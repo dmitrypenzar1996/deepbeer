@@ -316,10 +316,9 @@ class Masc2CallPeakOutput:
             
         return self._peaks_table
     
-def macs2callpeak_peak_path(outdir, peak_format):
+def macs2callpeak_peak_path(outdir, out_peak_pref, peak_format):
     peaks_path = os.path.join(outdir, 
-                              f"{self.out_peak_pref}_peaks.{peak_format}")
-
+                              f"{out_peak_pref}_peaks.{peak_format}")
     return peaks_path
 
 
@@ -347,7 +346,9 @@ class Macs2CallPeak(Task):
         if result.returncode != 0:
             raise signals.FAIL()    
         
-        peaks_path = macs2callpeak_peak_path(outdir, self.macs2callpeak_cfg['peak_format'])
+        peaks_path = macs2callpeak_peak_path(outdir,
+                                             out_peak_pref,
+                                             self.macs2callpeak_cfg['peak_format'])
             
         parsed_r = Masc2CallPeakOutput(peaks_path, result.stdout.decode())
         parsed_r.warning(self.logger)

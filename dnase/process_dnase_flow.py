@@ -278,7 +278,7 @@ class Masc2CallPeakOutput:
             msg = f"The number of called peaks is less than {self.MIN_PEAKS}: {self.peaks_count}"
             warnings.append(msg)
         elif self.peaks_count > self.MAX_PEAKS:
-            msg = f"The number of called peaks is more than {self.MAX_PEAKS}: {self.peaks_count}"
+            msg = f"The number of called peaks is greater than {self.MAX_PEAKS}: {self.peaks_count}"
             warnings.append(msg)
         
         if self.median_peak_length > self.MAX_PEAKS_MEDIAN_LENGTH:
@@ -361,11 +361,11 @@ class IDROutput:
     peak_fmt: str
     replic_cnt: int
     idr_out: str 
-    _peaks_count: int = dataclasses.field(default=None, init=False, repr=False)
+    _median_peak_length: int = dataclasses.field(default=None, init=False, repr=False)
     _peaks_table: pd.DataFrame = dataclasses.field(default=None, init=False, repr=False)
         
     REGULAR_PEAK_COLUMNS: ClassVar[dict] = {
-        'narrow': [
+        'narrowPeak': [
             "chr",
             "start",
             "end",
@@ -378,7 +378,7 @@ class IDROutput:
             "center", # peak center
             "localIDR",
             "globalIDR"],
-        "broad": [
+        "broadPeak": [
             "chr",
             "start",
             "end",
@@ -429,6 +429,7 @@ class IDROutput:
         if self._peaks_table is None:
             tb = pd.read_table(self.peaks_path)
             tb.columns = self.colnames # to avoid table truncating 
+            tb['length'] = tb['end'] - tb['start']
             self._peaks_table = tb
         return self._peaks_table
     
@@ -442,21 +443,21 @@ class IDROutput:
         warnings = []
         pos = self.positive_dataset()
         if pos.shape[0] < self.MIN_POSITIVE_SIZE:
-            msg = f"The number of positive examples is less than {self.DEFAULT_MIN_POSITIVE_SIZE}"
+            msg = f"The number of positive examples is less than {self.MIN_POSITIVE_SIZE}: {pos.shape[0]}"
             warnings.append(msg)
         elif pos.shape[0] > self.MAX_POSITIVE_SIZE:
-            msg = f"The number of negative examples is less than {self.DEFAULT_MAX_POSITIVE_SIZE}"
+            msg = f"The number of positive examples is greater than {self.MAX_POSITIVE_SIZE}: {pos.shape[0]}"
             warnings.append(msg)
             
         neg = self.negative_dataset()
         if neg.shape[0] < self.MIN_NEGATIVE_SIZE:
-            msg = f"The number of negative examples is less than {self.DEFAULT_MIN_NEGATIVE_SIZE}"
+            msg = f"The number of negative examples is less than {self.MIN_NEGATIVE_SIZE}: {neg.shape[0]}"
             warnings.append(msg)
         elif neg.shape[0] > self.MAX_POSITIVE_SIZE:
-            msg = f"The number of negative examples is less than {self.DEFAULT_MIN_NEGATIVE_SIZE}"
+            msg = f"The number of negative examples is greater than {self.MAX_NEGATIVE_SIZE}: {neg.shape[0]}"
             warnings.append(msg)
             
-        if self.median_peak_length(self) > self.MAX_PEAKS_MEDIAN_LENGTH:
+        if self.median_peak_length > self.MAX_PEAKS_MEDIAN_LENGTH:
             msg = f"The median peak length is greater than {self.MAX_PEAKS_MEDIAN_LENGTH}: {self.median_peak_length}"
             warnings.append(msg)
         
@@ -472,17 +473,17 @@ class IDROutput:
     
     def positive_dataset(self, idr_threshold=None):
         idr_threshold = idr_threshold or self.POSITIVE_IDR_THR
-        ths = IDROutput.prop_to_idrcolval(idr_threshold)
-        return self.peaks_table[self.peaks_table.globalIDR >= ths]
+        score_ths = IDROutput.idr_to_score(idr_threshold)
+        return self.peaks_table[self.peaks_table['score'] >= score_ths]
     
     def negative_dataset(self, idr_threshold=None):
         idr_threshold = idr_threshold or self.NEGATIVE_IDR_THR
-        ths = IDROutput.prop_to_idrcolval(idr_threshold)
-        return self.peaks_table[self.peaks_table.globalIDR <= ths]
+        score_ths = IDROutput.idr_to_score(idr_threshold)
+        return self.peaks_table[self.peaks_table['score'] <= score_ths]
     
     
     @staticmethod
-    def prop_to_idrcolval(p):
+    def idr_to_score(p):
         return min(int(-125 * np.log2(p)),
                    1000)
     
@@ -534,11 +535,11 @@ class IDR(Task):
         if result.returncode != 0:
             raise signals.FAIL()    
                     
-        parsed_r = IDROutput(out_file, peak_fmt, 2, result.stdout.decode())
+        parsed_r = IDROutput(out_file, peak_fmt, 2, result.stderr.decode())
         parsed_r.warning(self.logger)
         
         return parsed_r
-    
+   
 @task(name="Infer bam format")
 def infer_bam_format(check1, check2):
     if check1.paired.total == 0 and check2.paired.total == 0:

@@ -229,7 +229,7 @@ def make_macs2_callpeak_cmd(*,
 class Masc2CallPeakOutput:
     peak_path: str
     masc_out: str
-    _median_peak_length: int = dataclasses.field(default=None, init=False, repr=False)
+    _q75_peak_length: int = dataclasses.field(default=None, init=False, repr=False)
     _peaks_table: pd.DataFrame = dataclasses.field(default=None, init=False, repr=False)
 
     NARROW_PEAK_COLUMNS: ClassVar[list] = [
@@ -260,17 +260,17 @@ class Masc2CallPeakOutput:
     MIN_PEAKS: ClassVar[int] = 10 ** 5
     MAX_PEAKS: ClassVar[int] = 10 ** 6 
         
-    MAX_PEAKS_MEDIAN_LENGTH: ClassVar[int] = 1500
+    MAX_PEAKS_Q75_LENGTH: ClassVar[int] = 1500
     
     @property
     def peaks_count(self):
         return self.peaks_table.shape[0]
     
     @property
-    def median_peak_length(self):
-        if self._median_peak_length is None:
-            self._median_peak_length = np.median(self.peaks_table['length'])
-        return self._median_peak_length
+    def q75_peak_length(self):
+        if self._q75_peak_length is None:
+            self._q75_peak_length = np.quantile(self.peaks_table['length'], 0.75)
+        return self._q75_peak_length
     
     def generate_warnings(self):
         warnings = []
@@ -281,8 +281,8 @@ class Masc2CallPeakOutput:
             msg = f"The number of called peaks is greater than {self.MAX_PEAKS}: {self.peaks_count}"
             warnings.append(msg)
         
-        if self.median_peak_length > self.MAX_PEAKS_MEDIAN_LENGTH:
-            msg = f"The median peak length is greater than {self.MAX_PEAKS_MEDIAN_LENGTH}: {self.median_peak_length}"
+        if self.q75_peak_length > self.MAX_PEAKS_Q75_LENGTH:
+            msg = f"The 75% quantile peak length is greater than {self.MAX_PEAKS_Q75_LENGTH}: {self.q75_peak_length}"
             warnings.append(msg)
 
         return "\n".join(warnings)
@@ -361,7 +361,7 @@ class IDROutput:
     peak_fmt: str
     replic_cnt: int
     idr_out: str 
-    _median_peak_length: int = dataclasses.field(default=None, init=False, repr=False)
+    _q75_peak_length: int = dataclasses.field(default=None, init=False, repr=False)
     _peaks_table: pd.DataFrame = dataclasses.field(default=None, init=False, repr=False)
         
     REGULAR_PEAK_COLUMNS: ClassVar[dict] = {
@@ -411,7 +411,7 @@ class IDROutput:
     MIN_NEGATIVE_SIZE: ClassVar[int] = 10 ** 4
     MAX_NEGATIVE_SIZE: ClassVar[int] = 10 ** 5
     
-    MAX_PEAKS_MEDIAN_LENGTH: ClassVar[int] = 1500
+    MAX_PEAKS_Q75_LENGTH: ClassVar[int] = 1500
 
     @property
     def colnames(self):
@@ -434,10 +434,10 @@ class IDROutput:
         return self._peaks_table
     
     @property
-    def median_peak_length(self):
-        if self._median_peak_length is None:
-            self._median_peak_length = np.median(self.peaks_table['length'])
-        return self._median_peak_length
+    def q75_peak_length(self):
+        if self._q75_peak_length is None:
+            self._q75_peak_length = np.quantile(self.peaks_table['length'], 0.75)
+        return self._q75_peak_length
     
     def generate_warnings(self):
         warnings = []
@@ -457,8 +457,8 @@ class IDROutput:
             msg = f"The number of negative examples is greater than {self.MAX_NEGATIVE_SIZE}: {neg.shape[0]}"
             warnings.append(msg)
             
-        if self.median_peak_length > self.MAX_PEAKS_MEDIAN_LENGTH:
-            msg = f"The median peak length is greater than {self.MAX_PEAKS_MEDIAN_LENGTH}: {self.median_peak_length}"
+        if self.q75_peak_length > self.MAX_PEAKS_Q75_LENGTH:
+            msg = f"The 75% quantile peak length is greater than {self.MAX_PEAKS_Q75_LENGTH}: {self.q75_peak_length}"
             warnings.append(msg)
         
         return "\n".join(warnings)

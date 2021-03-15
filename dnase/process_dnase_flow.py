@@ -393,11 +393,11 @@ class IDROutput:
     }
         
     PER_REPLIC_COLUMNS: ClassVar[dict] = {
-        "narrow":["start",
+        "narrowPeak":["start",
                   "end",
                   "signalValue",
                   "center"],
-        "broad":["start",
+        "broadPeak":["start",
                   "end",
                   "signalValue"]
     }
@@ -471,12 +471,12 @@ class IDROutput:
         return 0
     
     def positive_dataset(self, idr_threshold=None):
-        idr_threshold = idr_threshold or DEFAULT_POSITIVE_IDR_THR
+        idr_threshold = idr_threshold or self.POSITIVE_IDR_THR
         ths = IDROutput.prop_to_idrcolval(idr_threshold)
         return self.peaks_table[self.peaks_table.globalIDR >= ths]
     
     def negative_dataset(self, idr_threshold=None):
-        idr_threshold = idr_threshold or DEFAULT_POSITIVE_IDR_THR
+        idr_threshold = idr_threshold or self.NEGATIVE_IDR_THR
         ths = IDROutput.prop_to_idrcolval(idr_threshold)
         return self.peaks_table[self.peaks_table.globalIDR <= ths]
     
@@ -589,7 +589,7 @@ def create_dnase_process_flow():
                            run_dir,  
                            align_name, 
                            lambda x: os.path.basename(x), 
-                            rm_if_exist=True)
+                           rm_if_exist=True)
 
 
         checker1 = BAMChecker(SAMTOOLS_FLAGSTAT_CHECK_CFG, name="check replic1")  

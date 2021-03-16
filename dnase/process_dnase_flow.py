@@ -11,6 +11,7 @@ import pandas as pd
 import prefect
 from prefect import Task, task
 from prefect import Flow, Parameter
+from prefect import unmapped, apply_map 
 from prefect.engine import signals
 
 from dataclasses import dataclass
@@ -520,6 +521,7 @@ class IDR(Task):
             out_dir,
             peak_fmt):
         
+        
         peak_files = [p.peak_path for p in peaks]
         oracle_path = oracle.peak_path if oracle else None
         
@@ -546,8 +548,10 @@ def infer_bam_format(check1, check2):
         fmt = "BAM"
     elif check1.paired.total != 0 and check2.paired.total != 0:
         fmt = "BAMPE"
-    else:
-        raise signals.FAIL
+    else: # one replic is paired and one is unpaired
+        logger = prefect.context.get("logger")
+        logger.warning("Replics have different formats")
+        fmt = "BAM"
     return fmt
 
 @task(name="Locate experiment files")
@@ -555,7 +559,7 @@ def find_exp_files(exp_name, exp_type, root_dir):
     src_mask = os.path.join(root_dir, exp_type, f"{exp_name}_[0-9]*.bam")
     exp_files = glob.glob(src_mask)
     if not exp_files:
-        raise signals.FAIL
+        raise signals.FAIL("No expeeriment files found")
     return exp_files
 
 @task(name="Link files to the destination dir")
@@ -573,62 +577,71 @@ def link_files(files, dest_dir, base_name, name_template_fn, rm_if_exist):
         os.symlink(bam_path, r_path)
         paths.append(r_path)
         
-    return paths
+    return dirpath, paths
 
 def create_dnase_process_flow():
     with Flow("experiment") as flow:
         root_dir = Parameter('root_dir')
         run_dir = Parameter('run_dir')
-        exp_type = Parameter('exp_type')
-        align_name = Parameter('align_name')
+        exp_type_lst = Parameter('exp_type')
+        align_name_lst = Parameter('align_name')
 
-        exp_files = find_exp_files(align_name, 
-                                   exp_type, 
-                                   root_dir)
+        exp_files_lst = find_exp_files.map(align_name_lst, 
+                                   exp_type_lst, 
+                                   unmapped(root_dir) )
 
-        bam_links = link_files(exp_files,
-                           run_dir,  
-                           align_name, 
-                           lambda x: os.path.basename(x), 
-                           rm_if_exist=True)
+        all_paths = link_files.map(exp_files_lst,
+                           unmapped(run_dir),  
+                           align_name_lst, 
+                           unmapped(lambda x: os.path.basename(x)), 
+                           rm_if_exist=unmapped(True))
+        
+        outdirs = apply_map(lambda x: x[0], all_paths)
+        bam_links = apply_map(lambda x: x[1], all_paths)
 
-
+        
+        replics1 = apply_map(lambda x: x[0], bam_links)
+        replics2 = apply_map(lambda x: x[1], bam_links)
+        
         checker1 = BAMChecker(SAMTOOLS_FLAGSTAT_CHECK_CFG, name="check replic1")  
-        check1 = checker1(bam_links[0])
+        check1 = checker1.map(replics1)
 
         checker2 = BAMChecker(SAMTOOLS_FLAGSTAT_CHECK_CFG, name="check replic2")  
-        check2 = checker2(bam_links[1])
-
-        fmt = infer_bam_format(check1, check2)
+        check2 = checker2.map(replics2)
+        
+        
+        fmt = infer_bam_format.map(check1, check2)
 
         callpeak1 = Macs2CallPeak(DNASE_MASC2_CALLPEAK_CFG, name="callpeak replic1")
-        peak1 = callpeak1(treatment_files=bam_links[0], 
-                 control_files=None,
+        peak1 = callpeak1.map(treatment_files= replics1, 
+                 control_files=unmapped(None),
                  fmt=fmt,
-                 outdir=run_dir,
-                 out_peak_pref="1")
+                 outdir=outdirs,
+                 out_peak_pref=unmapped("1") )
 
         callpeak2 = Macs2CallPeak(DNASE_MASC2_CALLPEAK_CFG, name="callpeak replic2")
-        peak2 = callpeak2(treatment_files=bam_links[1], 
-                 control_files=None,
+        peak2 = callpeak2.map(treatment_files=replics2, 
+                 control_files=unmapped(None),
                  fmt=fmt,
-                 outdir=run_dir,
-                 out_peak_pref="2")
+                 outdir=outdirs,
+                 out_peak_pref=unmapped("2"))
 
         callpeak_joined = Macs2CallPeak(DNASE_MASC2_CALLPEAK_CFG, name="callpeak joined")
-        oracle = callpeak_joined(treatment_files=bam_links, 
-                 control_files=None,
+        oracle = callpeak_joined.map(treatment_files=bam_links, 
+                 control_files=unmapped(None),
                  fmt=fmt,
-                 outdir=run_dir,
-                 out_peak_pref="joined")
+                 outdir=outdirs,
+                 out_peak_pref=unmapped("joined"))
 
         idr = IDR(DNASE_IDR_CFG, name="idr joining")
+        
+        peaks = apply_map(lambda x, y: [x, y],
+                          peak1, 
+                          peak2)
 
-
-        idr(peaks=[peak1, peak2], 
+        idr.map(peaks=peaks, 
             oracle=oracle,
-            out_dir=run_dir, 
-            peak_fmt=DNASE_MASC2_CALLPEAK_CFG["peak_format"])
+            out_dir=outdirs, 
+            peak_fmt=unmapped(DNASE_MASC2_CALLPEAK_CFG["peak_format"]))
         
     return flow
-    

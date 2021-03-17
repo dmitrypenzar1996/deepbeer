@@ -403,8 +403,8 @@ class IDROutput:
                   "signalValue"]
     }
         
-    POSITIVE_IDR_THR: ClassVar[int] = 0.20
-    NEGATIVE_IDR_THR: ClassVar[int] = 0.50
+    POSITIVE_IDR_THR: ClassVar[int] = 0.05
+    NEGATIVE_IDR_THR: ClassVar[int] = 0.25
 
     MIN_POSITIVE_SIZE: ClassVar[int] = 10 ** 4
     MAX_POSITIVE_SIZE: ClassVar[int] = 10 ** 5

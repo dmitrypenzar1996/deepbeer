@@ -11,7 +11,7 @@ import pandas as pd
 import prefect
 from prefect import Task, task
 from prefect import Flow, Parameter
-from prefect import unmapped, apply_map 
+from prefect import unmapped
 from prefect.engine import signals
 
 from dataclasses import dataclass
@@ -35,7 +35,7 @@ DNASE_IDR_CFG = dict(idr_ths=1,
 
 SAMTOOLS_FLAGSTAT_CHECK_CFG = dict(
     samtools_path="/home/penzard/bio/bin/bin/samtools",
-    threads=10)
+    threads=5)
 
 def run_cmd(cmd, *, timeout=None):
     cmd = shlex.split(cmd)
@@ -579,6 +579,15 @@ def link_files(files, dest_dir, base_name, name_template_fn, rm_if_exist):
         
     return dirpath, paths
 
+@task
+def get_list_index(x, ind):
+    return x[ind]
+
+# no *args supported
+@task
+def combine2_in_list(x, y):
+    return [x, y]
+
 def create_dnase_process_flow():
     with Flow("experiment") as flow:
         root_dir = Parameter('root_dir')
@@ -596,12 +605,11 @@ def create_dnase_process_flow():
                            unmapped(lambda x: os.path.basename(x)), 
                            rm_if_exist=unmapped(True))
         
-        outdirs = apply_map(lambda x: x[0], all_paths)
-        bam_links = apply_map(lambda x: x[1], all_paths)
 
-        
-        replics1 = apply_map(lambda x: x[0], bam_links)
-        replics2 = apply_map(lambda x: x[1], bam_links)
+        outdirs = get_list_index.map(all_paths, unmapped(0))
+        bam_links = get_list_index.map(all_paths, unmapped(1))
+        replics1 = get_list_index.map(bam_links, unmapped(0))
+        replics2 = get_list_index.map(bam_links, unmapped(1))
         
         checker1 = BAMChecker(SAMTOOLS_FLAGSTAT_CHECK_CFG, name="check replic1")  
         check1 = checker1.map(replics1)
@@ -633,11 +641,10 @@ def create_dnase_process_flow():
                  outdir=outdirs,
                  out_peak_pref=unmapped("joined"))
 
-        idr = IDR(DNASE_IDR_CFG, name="idr joining")
         
-        peaks = apply_map(lambda x, y: [x, y],
-                          peak1, 
-                          peak2)
+        peaks = combine2_in_list.map(peak1, peak2)
+        idr = IDR(DNASE_IDR_CFG, name="idr joining")
+       
 
         idr.map(peaks=peaks, 
             oracle=oracle,
@@ -645,3 +652,4 @@ def create_dnase_process_flow():
             peak_fmt=unmapped(DNASE_MASC2_CALLPEAK_CFG["peak_format"]))
         
     return flow
+    

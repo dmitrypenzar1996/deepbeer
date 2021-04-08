@@ -12,14 +12,16 @@ import random
 import pandas as pd 
 
 from dataclasses import dataclass, field, InitVar
-from typing import ClassVar, Union
+from typing import ClassVar, Union, Callable, Optional, Generator
+from collections.abc import Iterable
 
 from pathlib import Path
+from itertools import zip_longest
 
-def is_user_executable(path):
+def is_user_executable(path: Path) -> bool:
     return path.stat().st_mode & stat.S_IXUSR != 0
 
-def run_cmd(cmd, *, timeout=None):
+def run_cmd(cmd: str, *, timeout=None) -> subprocess.CompletedProcess:
     cmd = shlex.split(cmd)
     pr = subprocess.run(cmd,
                         stdout=subprocess.PIPE,
@@ -27,15 +29,52 @@ def run_cmd(cmd, *, timeout=None):
                         timeout=timeout)
     return pr
 
-def random_string(length:int = 16, alphabet=string.ascii_letters + string.digits):
+def random_string(length:int = 16,
+                  alphabet: str =string.ascii_letters + string.digits) -> str:
     return "".join(random.choices(alphabet, k=length))
+
+def zip_strict(*iterables) -> Iterable[tuple]: # waiting for Python 3.10 to just use zip strict option
+    sentinel = object()
+    for combo in zip_longest(*iterables, fillvalue=sentinel):
+        if sentinel in combo:
+            raise ValueError('Iterables have different lengths')
+        yield combo
+        
+def id2kmer(kmer_id: int,
+            k: int,
+            alphabet: list[str] =['A', 'C', 'G', 'T']) -> str:
+    kmer = []
+    size = len(alphabet)
+    for i in range(k):
+        kmer.append(alphabet[kmer_id % size])
+        kmer_id //= size
+    return "".join(reversed(kmer))
+
+def reverse_complement(seq: str, 
+                       alphabet: dict[str, str]={"A": "T", "C": "G", "G": "C", "T": "A"}) -> str:
+    rev_compl = []
+    for s in reversed(seq):
+        rev_compl.append(alphabet[s])
+    return "".join(rev_compl)
+
+def kmers_generator(k: int) -> Generator[str, None, None]:
+    if k <= 0:
+        raise Exception(f"k must positive: {k}")
+    kmers = set()
+    for i in range(4 ** k):
+        s = id2kmer(i, k)
+        if s not in kmers:
+            yield s
+        kmers.add(s)
+        rs = reverse_complement(s)
+        kmers.add(rs)
 
 class ConfigException(Exception):
     pass
 
 @dataclass
 class Config:  
-    def _infer_validations(self):   
+    def _infer_validations(self) -> list[Callable[[Config], None]]:   
         validations = [] 
         for par in self.__dict__:
             val_name = f"validate_{par}"
@@ -47,32 +86,42 @@ class Config:
                 validations.append(m)
         return validations
     
-    def validate(self):
+    def validate(self) -> None:
         for v in self._validations:
             getattr(self, v)()
                         
-    def save(self, config_path):
+    def save(self, 
+             config_path: Union[str, Path],
+             exists_ok: bool = True) -> None:
+        config_path = Path(config_path)
+        
         dt = {key:value for key, value in self.__dict__.items() if key != "_validations"}
+        if config_path.exists():
+            if config_path.is_dir():
+                raise ConfigException("Provided path is dir")
+            if not exists_ok:
+                raise ConfigException("Provided path exists")
         with open(config_path, 'w') as output:
             json.dump(dt, output, indent=4)
             
-    def set_nans(self):
+    def set_nans(self) -> None:
         pass
     
-    def __post_init__(self):  
+    def __post_init__(self) -> None:  
         self.set_nans()
         self._validations = self._infer_validations()
         self.validate()
         
     @classmethod
-    def load_config(cls, config_path):
+    def load(cls, 
+                    config_path: [str, Path]) -> Config:
         cls.check_config_path(config_path)
         with open(config_path) as infile:
             dt = json.load(infile)
         return cls(**dt)
     
     @staticmethod
-    def check_config_path(config_path):
+    def check_config_path(config_path: [str, Path]) -> None:
         config_path = Path(config_path)
         if not config_path.exists():
             raise ConfigException("Config path doesn't exists")
@@ -88,13 +137,13 @@ class GKM_Train_Config(Config):
     word_length: int = 11
     info_cols_cnt: int = 7
     max_mismatch: int = 3
-    C: Union[None, float] = None
+    C: Optional[float] = None
     pos_weight: float = 1.0
     distinct_reversed: bool = False 
-    gamma: Union[None, float] = None
+    gamma: Optional[float] = None
     eps: float = 0.001
-    initial_decay_value: Union[None, int] = None # 50
-    half_decay_distance: Union[None, float] = None # 50
+    initial_decay_value: Optional[int] = None # 50
+    half_decay_distance: Optional[float] = None # 50
     n_procs: int = 1
     cache_size: float = 100
     use_shrinkage: bool = False
@@ -132,26 +181,31 @@ class GKM_Train_Config(Config):
         "wgkmrbf": 10.0
     } 
     
-    def validate_kernel(self):
+    def validate_kernel(self) -> None:
         if self.kernel not in self.KERNELS:
             raise GKM_SVM_Exception(f"Wrong kernel name: {self.kernel}")
 
-    def validate_word_length(self):
+    def validate_word_length(self) -> None:
         if not isinstance(self.word_length, int) or self.word_length < 3 or self.word_length > 12:
-            raise GKM_SVM_Exception(f"Wrong word length: {self.word_length}."
+            raise GKM_SVM_Exception(f"Wrong word length: {self.word_length}. "
                                     f" Must be an integer in [3, 12]")
 
-    def validate_info_cols_cnt(self):
+    def validate_info_cols_cnt(self) -> None:
         if not isinstance(self.info_cols_cnt, int) or self.info_cols_cnt < 1 or self.info_cols_cnt > self.word_length:
-            raise GKM_SVM_Exception(f"Wrong number of informative columns {self.info_cols_cnt}."
+            raise GKM_SVM_Exception(f"Wrong number of informative columns {self.info_cols_cnt}. "
                                     f"Must be an integer in [1, {self.word_length}]")
 
-    def validate_max_mismatch(self):
+    def validate_max_mismatch(self) -> None:
         if not isinstance(self.max_mismatch, int) or self.max_mismatch < 0 or self.max_mismatch > 4:
-            raise GKM_SVM_Exception(f"Wrong max mismatches: {self.max_mismatch}."
+            raise GKM_SVM_Exception(f"Wrong number of max mismatches: {self.max_mismatch}. "
                                     f"Must be an integer in [0, 4]")
+        max_m = self.word_length - self.info_cols_cnt
+        if self.max_mismatch > self.word_length - self.info_cols_cnt:
+            raise GKM_SVM_Exception(f"Wrong number of max mismatches: {self.max_mismatch}. "
+                                    f"Can't be greater then word_length - info_cols_cnt: {max_m}")
+            
 
-    def validate_gamma(self):
+    def validate_gamma(self) -> None:
         if not self.kernel in self.RBF_KERNELS:
             if self.gamma is not None:
                 raise GKM_SVM_Exception(f"Gamma can be set only for rbf kernels ({', '.join(self.RBF_KERNELS)}), "
@@ -160,7 +214,7 @@ class GKM_Train_Config(Config):
             if not isinstance(self.gamma, (float, int)) or self.gamma <= 0:
                 raise GKM_SVM_Exception(f"Wrong gamma value: {self.gamma}. Must be a float greater then 0")
 
-    def validate_initial_decay_value(self):
+    def validate_initial_decay_value(self) -> None:
         if not self.kernel in self.WEIGHT_KERNELS:
             if self.initial_decay_value is not None:
                 raise GKM_SVM_Exception(f"Initial decay value can be set only for weight kernels: "
@@ -171,7 +225,7 @@ class GKM_Train_Config(Config):
                 raise  GKM_SVM_Exception(f"Wrong initial decay value: {self.initial_decay_value}. "
                                          f"Must be an integer in [1, 255]")
 
-    def validate_half_decay_distance(self):
+    def validate_half_decay_distance(self) -> None:
         if not self.kernel in self.WEIGHT_KERNELS:
             if self.half_decay_distance is not None:
                 raise GKM_SVM_Exception(f"Half decay value can be set only for weight kernels: "
@@ -181,47 +235,47 @@ class GKM_Train_Config(Config):
                 raise GKM_SVM_Exception(f"Wrong half decay distance: {self.half_decay_distance}. "
                                         f"Must be a float greater then 0")
 
-    def validate_C(self):
+    def validate_C(self) -> None:
         if not isinstance(self.C, (float, int)) or self.C < 0:
             raise GKM_SVM_Exception(f"Wrong C value: {self.C}. "
                                     f"Must be a float greater then 0")
 
-    def validate_precision(self):
+    def validate_precision(self) -> None:
         if not isinstance(self.eps, float) or self.eps <= 0:
             raise GKM_SVM_Exception(f"Wrong precision parameter epsilon value: {self.eps}. "
                                     f"Must be a float greater then 0")
 
-    def validate_positive_weight(self):
+    def validate_positive_weight(self) -> None:
         if not isinstance(self.pos_weight, (float, int)) or self.pos_weight <= 0:
             raise GKM_SVM_Exception(f"Wrong weight value: {self.pos_weight}. "
                                     f"Must be a float greater then 0")
 
-    def validate_cache_size(self):
+    def validate_cache_size(self) -> None:
         if not isinstance(self.cache_size, (float, int)) or self.cache_size <= 0:
             raise GKM_SVM_Exception(f"Wrong cache size value: {self.cache_size}. "
                                     f"Must be a float greater then 0")
 
-    def validate_use_shrinkage(self):
+    def validate_use_shrinkage(self) -> None:
         if not isinstance(self.use_shrinkage, bool):
             raise GKM_SVM_Exception(f"Wrong use_shrinkage value: {self.use_shrinkage}. "
                                     f"Must be boolean")
 
-    def validate_n_procs(self):
+    def validate_n_procs(self) -> None:
         if self.n_procs not in (1, 4, 16):
             raise GKM_SVM_Exception(f"Wrong n_procs value: {self.n_procs}. "
                                     f"Must be 1, 4 or 16")
 
-    def validate_verbosity(self):
+    def validate_verbosity(self) -> None:
         if self.verbosity not in self.VERBOSE_LEVELS:
             raise GKM_SVM_Exception(f"Wrong verbosity value: {self.verbosity}. "
                                     f"Must be one of {', '.join(self.VERBOSE_LEVELS)}")
             
-    def validate_distinct_reversed(self):
+    def validate_distinct_reversed(self) -> None:
         if not isinstance(self.distinct_reversed, bool):
             raise GKM_SVM_Exception(f"Wrong distinct reversed value: {self.distinct_reversed}. "
                                     f"Must be boolean")
             
-    def validate_gkmtrain_path(self):
+    def validate_gkmtrain_path(self) -> None:
         path = Path(self.gkmtrain_path)
         if not path.exists():
             raise GKM_SVM_Exception(f"Wrong path to gkmtrain: {self.gkmtrain_path}. "
@@ -230,9 +284,7 @@ class GKM_Train_Config(Config):
             raise GKM_SVM_Exception(f"Wrong path to gkmtrain: {self.gkmtrain_path}. "
                                     f"Must be executable by te current user")
         
-            
-    
-    def set_nans(self):
+    def set_nans(self) -> None:
         if self.gamma is None and self.kernel in self.RBF_KERNELS:
             self.gamma = self.DEFAULT_GAMMA
         if self.initial_decay_value is None and self.kernel in self.WEIGHT_KERNELS:
@@ -244,7 +296,7 @@ class GKM_Train_Config(Config):
             self.C = self.DEFAULT_C[self.kernel]
             
             
-    def to_command_line(self):
+    def to_command_line(self) -> str:
         return f'''
 {self.gkmtrain_path}
 -t {self.KERNELS[self.kernel]}
@@ -277,12 +329,12 @@ class GKM_Predict_Config(Config):
         "debug": 3,
         "trace": 4}
         
-    def validate_verbosity(self):
+    def validate_verbosity(self) -> None:
         if self.verbosity not in self.VERBOSE_LEVELS:
             raise GKM_SVM_Exception(f"Wrong verbosity value: {self.verbosity}. "
                                     f"Must be one of {', '.join(self.VERBOSE_LEVELS)}")
     
-    def validate_gkmtest_path(self):
+    def validate_gkmtest_path(self) -> None:
         path = Path(self.gkmpredict_path)
         if not path.exists():
             raise GKM_SVM_Exception(f"Wrong path to gkmtrain: {self.gkmpredict_path}. "
@@ -291,12 +343,12 @@ class GKM_Predict_Config(Config):
             raise GKM_SVM_Exception(f"Wrong path to gkmtrain: {self.gkmpredict_path}. "
                                     f"Must be executable by te current user")
             
-    def validate_n_procs(self):
+    def validate_n_procs(self) -> None:
         if self.n_procs not in (1, 4, 16):
             raise GKM_SVM_Exception(f"Wrong n_procs value: {self.n_procs}. "
                                     f"Must be 1, 4 or 16")
             
-    def to_command_line(self):
+    def to_command_line(self) -> str:
         return f'''
 {self.gkmpredict_path}
 -v {self.verbosity}
@@ -305,11 +357,25 @@ class GKM_Predict_Config(Config):
 
 @dataclass
 class GKM_Dataset:
-    path: Union[None, Path] = None
-    
+    path: Optional[Path] = None
     
     @staticmethod
-    def _check_X(X):
+    def get_sequential_namer(pref: str="seq") -> Callable[[str], str]:
+        ind = 0
+        def sequential_namer(x: str) -> str:
+            nonlocal ind 
+            ind += 1
+            return f"{pref}_{ind}"
+        return sequential_namer
+    
+    @staticmethod
+    def get_id_namer() -> Callable[[str], str]:
+        def id_namer(x: str) -> str:
+            return x
+        return id_namer
+    
+    @staticmethod
+    def _check_X(X) -> None:
         if not isinstance(X, (list, np.array)):
             raise GKM_SVM_Exception(f"X must be list or array of strings")
             
@@ -319,182 +385,228 @@ class GKM_Dataset:
                 
     @classmethod
     def from_fasta_file(cls, 
-                        fasta_path: Union[str, Path]):
-        return cls(path=fasta_path)
+                        fasta_path: Union[str, Path]) -> GKM_Dataset:
+        return cls(path=Path(fasta_path))
     
     @classmethod
     def from_bed_file(bed_path: Union[str, Path], 
-                      genome_path: Union[str, Path]):
+                      genome_path: Union[str, Path]) -> GKM_Dataset:
         raise NotImplementedError()
     
     @classmethod
-    def from_gc_sampling(dataset: GKM_Dataset):
+    def from_gc_sampling(dataset: GKM_Dataset) -> GKM_Dataset:
         raise NotImplementedError()
         
     @classmethod
-    def kmer_dataset(kmer_size: int):
-        raise NotImplementedError()
+    def kmer_dataset(cls, 
+                     kmer_size: int,
+                     path: Optional[Union[str, Path]]=None, 
+                     exists_ok=False) -> GKM_Dataset:
+        if path is None:
+            path = Path(tempfile.NamedTemporaryFile(mode="w+").name)
+        return cls.from_seqs(kmers_generator(kmer_size), path, namer=cls.get_id_namer())
 
+            
+    @classmethod
+    def from_seqs(cls,
+                  seqs: Iterable[str],
+                  path: Optional[Union[str, Path]]=None,
+                  namer: Optional[Callable[[str], str]]=None) -> GKM_Dataset:
+        if namer is None:
+            namer = cls.get_sequential_namer()
+        names = map(namer, seqs)
+        return cls.from_seqs_names(names, seqs, path)
+                
+    @classmethod
+    def from_seqs_names(cls,
+                        names: Iterable[str],
+                        seqs: Iterable[str],
+                        path: Optional[Union[str, Path]]=None) -> GKM_Dataset:
+        if path is None:
+            path = Path(tempfile.NamedTemporaryFile(mode="w+").name)
+        with open(path, "w") as infile:
+            for name, seq in zip_strict(names, seqs):
+                infile.write(f">{name}\n{seq}\n")
+
+        return cls(path)
+        
 @dataclass
-class GKMSVM:
-    train_config: GKM_Train_Config = field(default_factory=GKM_Train_Config)
-    predict_config: GKM_Predict_Config = field(default_factory=GKM_Predict_Config)
-    model_path: Union[None, Path] = None
-    model_tag: Union[None, str] = None
+class GKMSVM_Trainer:
+    workdir: Path
+    config: GKM_Train_Config =  field(default_factory=GKM_Train_Config)
+        
+    def run(self, 
+             pos_path: Path, 
+             neg_path: Path, 
+             out_pref: str) -> Path:
+        cmd = self._get_cmd(pos_path, neg_path, out_pref)
+        pr = run_cmd(cmd)
+        model_path = self._get_model_path(out_pref)
+        self._check_run(pr, 
+                        model_path)
 
-    workdir: Union[None, Path] = field(init=False)
-    _tmp_dir: Union[None, str] = field(default=None, 
-                                       init=False)
-    
-    rootdir: InitVar[Union[str, Path, None]] = None
-    exist_ok: InitVar[bool] = True
-    rm_if_exist: InitVar[bool] = False
-
-    @property
-    def fitted(self):
-        return self.model_path is not None
-    
-    @staticmethod
-    def _check_train_run(pr):
-        stdout = pr.stdout.decode()
+        return model_path
+        
+    def _check_run(self,
+                   pr: subprocess.CompletedProcess, 
+                   model_path: Path) -> None:
+        log_path = self._get_log_path(model_path)
+        stdout = self._store_runout(pr, log_path)
         if pr.returncode != 0:
             raise GKM_SVM_Exception(f"gkmtrain exited with error: {stdout}")
         
         lstd = stdout.lower()
         if "wrong" in lstd or "error" in lstd:
             raise GKM_SVM_Exception(f"gkmtrain exited with error: {stdout}")
-            
-    @staticmethod
-    def _check_predict_run(pr):
+
+        if not model_path.exists():
+            raise GKM_SVM_Exception(f"For the uknown reason gkmtrain didn't create model file")
+    
+    def _get_cmd(self, 
+                 pos_path: Path,
+                 neg_path: Path,
+                 out_pref: Path) -> str:
+        cmd = self.config.to_command_line()
+        cmd = f"{cmd}\n {pos_path} {neg_path} {out_pref}"
+        return cmd
+    
+    def _get_model_path(self, out_pref: str) -> Path:
+        return Path(f"{out_pref}.model.txt")
+    
+    def _store_runout(self,
+                      pr: subprocess.CompletedProcess,
+                      path: str) -> str:
         stdout = pr.stdout.decode()
-        print("HELLO", stdout, pr)
+        with open(path, "w") as f:
+            f.write(stdout)
+        return stdout
+    
+    def _get_log_path(self, 
+                      output_file: Path):
+        log_path = self.workdir / f"{output_file.name}.train.log"
+        ind = 1
+        while log_path.exists():
+            ind += 1
+            log_path = self.workdir / f"{output_file.name}_{ind}.train.log"
+        return log_path
+    
+@dataclass
+class GKMSVM_Predictor:
+    workdir: Path
+    config: GKM_Predict_Config = field(default_factory=GKM_Predict_Config)
+        
+    def run(self,
+            model_path: Path,
+            test_seq_file: Path,
+            output_file: Path) -> Path:
+        cmd = self._get_cmd(model_path, 
+                            test_seq_file,
+                            output_file)
+        pr = run_cmd(cmd)
+        self._check_run(pr, output_file)
+        
+        return output_file
+    
+    def _get_cmd(self, 
+                 model_path: Path,
+                 test_seq_file: Path,
+                 output_file: Pat) -> str:
+        cmd = self.config.to_command_line()
+        cmd = f"{cmd}\n {test_seq_file} {model_path} {output_file}"
+        return cmd
+
+
+    def _check_run(self,
+                   pr: subprocess.CompletedProcess,
+                   pred_path:str) -> None:
+        log_path = self._get_log_path(pred_path)
+        stdout = self._store_runout(pr, log_path)
+        
         if pr.returncode != 0:
-            raise GKM_SVM_Exception(f"gkmpredict exited with error: {stdout}")
+            raise GKM_SVM_Exception(f"gkmpredict exited with error. Program stdout is at {logpath}")
         
         std_low = stdout.lower()
         if "wrong" in std_low or "error" in std_low:
-            raise GKM_SVM_Exception(f"gkmpredict exited with error: {stdout}")
-        
-    @classmethod
-    def _get_model_path_pref(cls, workdir) -> str:      
-        return  workdir / "gkm"
-    
-    @classmethod
-    def _get_model_path(cls, workdir) -> Path:
-        return Path(f"{cls._get_model_path_pref(workdir)}.model.txt")
-    
-    def _get_predictions_dir(self) -> Path:    
-        path = self.workdir / "predictions"
-        if not path.exists():
-            path.mkdir(parents=True)
-        return path
-    
-    def _get_prediction_path(self):
-        pred_dir = self._get_predictions_dir()
-        name = f"{random_string()}.prediction.tab"
-        while (pred_dir / name).exists():
-            name = f"{random_string()}.prediction.tab"
-        return pred_dir / name
-    
-    def _run_gkmtrain(self, pos_path, neg_path, out_pref):
-        cmd = self.train_config.to_command_line()
-        cmd = f"{cmd}\n {pos_path} {neg_path} {out_pref}"
-        pr = run_cmd(cmd)
-        return pr
-    
-    def _process_train_output(self):
-        path = self._get_model_path(self.workdir)
-        path = Path(path)
-        if not path.exists():
-            raise GKM_SVM_Exception(f"For the uknown reason gkmtrain didn't create model file")
-        self.model_path = path
-    
-    def fit(self, positive_dataset, negative_dataset):
-        if self.fitted:
-            self.restore()
-        out_pref = self._get_model_path_pref(self.workdir)
-        pr = self._run_gkmtrain(positive_dataset.path, negative_dataset.path, out_pref)
-        self._check_train_run(pr)
-        self._process_train_output()
-        return pr 
-    
-    def _run_gkmpredict(self, test_seq_file, output_file):
-        cmd = self.predict_config.to_command_line()
-        cmd = f"{cmd}\n {test_seq_file} {self.model_path} {output_file}"
-        pr = run_cmd(cmd)
-        return pr
-    
-    def _parse_pred_file(self, 
-                         pred_path: Path, 
-                         return_path: bool) -> Union[pd.DataFrame, Path]:
+            raise GKM_SVM_Exception(f"gkmpredict exited with error. Program stdout is at {logpath}")
+            
         if not pred_path.exists():
             raise GKM_SVM_Exception(f"For the uknown reason gkmpredict didn't create predictions file")
+            
+    def _get_log_path(self, 
+                      output_file: Path):
+        log_path = self.workdir / f"{output_file.name}.predict.log"
+        ind = 1
+        while log_path.exists():
+            ind += 1
+            log_path = self.workdir / f"{output_file.name}_{ind}.predict.log"
+        return log_path        
+    
+    def _store_runout(self,
+                      pr: subprocess.CompletedProcess,
+                      path: Path) -> str:
+        stdout = pr.stdout.decode()
+        with open(path, "w") as f:
+            f.write(stdout)
+        return stdout
+        
+@dataclass
+class GKMSVM:
+    model_path: Union[None, Path] = None
+    model_tag: Union[None, str] = None
+
+    trainer: GKMSVM_Trainer = field(init=False)
+    predictor: GKMSVM_Predictor = field(init=False)
+    workdir: Union[None, Path] = field(init=False)
+    _tmp_dir: Union[None, str] = field(default=None, 
+                                       init=False)
+    
+    train_config: InitVar[Union[GKM_Train_Config, Path, str]]  = field(default=GKM_Train_Config())
+    predict_config: InitVar[Union[GKM_Predict_Config, Path, str]] = field(default=GKM_Predict_Config())
+    rootdir: InitVar[Optional[Union[str, Path]]] = None
+    exist_ok: InitVar[bool] = True
+    rm_if_exist: InitVar[bool] = False
+        
+    def fit(self,
+            positive_dataset: GKM_Dataset,
+            negative_dataset: GKM_Dataset) -> GKMSVM:
+        if self.fitted:
+            self._restore()
+        out_pref = self._get_model_path_pref(self.workdir)
+        self.model_path = self.trainer.run(positive_dataset.path, negative_dataset.path, out_pref)
+        return self
+    
+    def predict(self, 
+                dataset: GKM_Dataset,
+                return_path: bool=False) -> Union[pd.DataFrame, Path]:
+        if not self.fitted:
+            raise GKM_SVM_Exception("Model is not trained")
+        pred_path = self._get_prediction_path()
+        self.predictor.run(self.model_path,
+                           dataset.path, 
+                           pred_path)
         if return_path:
             return pred_path
-        return pd.read_table(pred_path)
+        return pd.read_table(pred_path, header=None, names=["name", "score"])
     
-    def _store_stdout(self, pr, pred_path):
-        pass
-
-    def predict(self, dataset: GKM_Dataset, return_path: bool=False) -> Union[pd.DataFrame, Path]:
-        if not self.fitted:
-            raise GKM_SVM_Exception()
-        pred_path = self._get_prediction_path()
-        pr = self._run_gkmpredict(dataset.path, pred_path)
-        self._check_predict_run(pr)
-        self._store_stdout(pr, pred_path)
-        pred = self._parse_pred_file(pred_path, return_path=return_path)
-        return pred
+    def score_kmers(self, 
+                    k:int):
+        if  k < self.trainer.config.word_length:
+            raise GKM_SVM_Exception(f"Can't score kmers for k ({k}) < "
+                                    f"word_length ({self.trainer.config.word_length})")
+        ds = GKM_Dataset.kmer_dataset(k)
+        return self.predict(ds, return_path=True)
     
-    def restore(self):
+    def _restore(self) -> None:
         if self.fitted:
             self.model_path.unlink()
-    
-    @staticmethod
-    def _get_train_config_path(workdir: Path) -> Path:
-        return workdir / "train.cfg"
-    
-    @staticmethod
-    def _get_predict_config_path(workdir: Path) -> Path:
-        return workdir / "predict.cfg"
-    
-    def _save_cfg(self):
-        tr_path = self._get_train_config_path(self.workdir)
-        self.train_config.save(tr_path)
-        pr_path = self._get_predict_config_path(self.workdir)
-        self.predict_config.save(pr_path)
-    
-    def __post_init__(self, rootdir, exist_ok, rm_if_exist):
-        if rootdir is not None:
-            rootdir = Path(rootdir)
-            if self.model_tag is None:
-                model_tag = random_string()
-                while (rootdir / model_tag).exists():
-                    model_tag = random_string()
-                self.model_tag = model_tag
-            
-            self.workdir = rootdir / self.model_tag     
-            if self.workdir.exists():
-                if not exist_ok:
-                    raise GKM_SVM_Exception("Provided dir already exists")
-                if not self.workdir.is_dir():
-                    raise GKM_SVM_Exception("Provided path is not a dir")
-                if rm_if_exist:
-                    shutil.rmtree(self.workdir)  
-            self.workdir.mkdir(parents=True, exist_ok=True)
-        else:
-            self._tmp_dir = tempfile.TemporaryDirectory()
-            self.workdir = Path(self._tmp_dir.name)
-        self._save_cfg()
-        
-            
+       
     @classmethod
-    def from_modeldir(cls, workdir: Union[str, Path]):
+    def load(cls,
+             workdir: Union[str, Path]) -> GKMSVM:
         workdir = Path(workdir)
-        tr = cls._get_train_config_path(workdir)
-        tr_cfg = GKM_Train_Config.load_config(tr)
-        pr = cls._get_predict_config_path(workdir)
-        pr_cfg = GKM_Predict_Config.load_config(pr)
+        tr_cfg = cls._get_train_config_path(workdir)
+        pr_cfg = cls._get_predict_config_path(workdir)
+        
         model_path = cls._get_model_path(workdir)
         if not model_path.exists():
             model_path = None
@@ -508,5 +620,102 @@ class GKMSVM:
                    rootdir=rootdir,
                    exist_ok=True,
                    rm_if_exist=False)
+            
+    @staticmethod
+    def _gen_model_tag(root_dir: Path):
+        model_tag = random_string()
+        while (rootdir / model_tag).exists():
+            model_tag = random_string()
+        return model_tag
+    
+    def _check_workdir(self, 
+                       exist_ok:bool,
+                       rm_if_exist: bool) -> None:
+        if self.workdir.exists():
+            if not exist_ok:
+                raise GKM_SVM_Exception("Provided dir already exists")
+            if not self.workdir.is_dir():
+                raise GKM_SVM_Exception("Provided path is not a dir")
+            if rm_if_exist:
+                shutil.rmtree(self.workdir)
+                
+    def _init_workdir(self, 
+                      rootdir: Optional[Path],
+                      exist_ok: bool,
+                      rm_if_exist: bool):
+        if rootdir is not None:
+            if self.model_tag is None:
+                model_tag = self._gen_model_tag(root_dir)
+                self.model_tag = model_tag
+            self.workdir = rootdir / self.model_tag     
+            self._check_workdir(exist_ok=exist_ok,
+                                rm_if_exist=rm_if_exist)                        
+            self.workdir.mkdir(parents=True, exist_ok=True)
+        else:
+            self._tmp_dir = tempfile.TemporaryDirectory()
+            if self.model_tag is None:
+                self.model_tag = "model"
+            self.workdir = Path(self._tmp_dir.name) / self.model_tag
+                
+    def __post_init__(self, 
+                      train_config: Union[GKM_Train_Config, Path, str],
+                      predict_config: Union[GKM_Train_Config, Path, str],
+                      rootdir: Optional[Union[str, Path]], 
+                      exist_ok: bool,
+                      rm_if_exist: bool) -> None:
+        if rootdir is not None:
+            rootdir = Path(rootdir)
+        self._init_workdir(rootdir, 
+                           exist_ok=exist_ok, 
+                           rm_if_exist=rm_if_exist)
         
+        if isinstance(train_config, (Path, str)):
+            train_config = GKM_Train_Config.load(train_config)
+        if isinstance(predict_config, (Path, str)):
+            predict_config = GKM_Predict_Config.load(predict_config)
+
+        self.trainer = GKMSVM_Trainer(config=train_config, 
+                                      workdir=self.workdir)
+        self.predictor = GKMSVM_Predictor(config=predict_config,
+                                      workdir=self._get_predictions_dir())                                            
+        self._save_cfg()
+    
+    def _save_cfg(self) -> None:
+        tr_path = self._get_train_config_path(self.workdir)
+        self.trainer.config.save(tr_path)
+        pr_path = self._get_predict_config_path(self.workdir)
+        self.predictor.config.save(pr_path)                             
+    
+    @property
+    def fitted(self) -> bool:
+        return self.model_path is not None
+        
+    @classmethod
+    def _get_model_path_pref(cls, workdir) -> str:      
+        return  workdir / "gkm"
+    
+    @classmethod
+    def _get_model_path(cls, workdir) -> Path:
+        return Path(f"{cls._get_model_path_pref(workdir)}.model.txt")
+                                        
+    @staticmethod
+    def _get_train_config_path(workdir: Path) -> Path:
+        return workdir / "train.cfg"
+    
+    @staticmethod
+    def _get_predict_config_path(workdir: Path) -> Path:
+        return workdir / "predict.cfg"
+    
+    def _get_predictions_dir(self) -> Path:    
+        path = self.workdir / "predictions"
+        if not path.exists():
+            path.mkdir(parents=True)
+        return path
+    
+    def _get_prediction_path(self) -> Path:
+        pred_dir = self._get_predictions_dir()
+        name = f"{random_string()}.prediction.tab"
+        while (pred_dir / name).exists():
+            name = f"{random_string()}.prediction.tab"
+        return pred_dir / name
 

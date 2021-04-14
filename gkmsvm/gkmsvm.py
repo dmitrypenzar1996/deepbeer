@@ -14,9 +14,7 @@ import pandas as pd
 from dataclasses import dataclass, field, InitVar
 from typing import ClassVar, Union, Callable, Optional, Generator
 from collections.abc import Iterable
-
 from pathlib import Path
-from itertools import zip_longest
 
 def is_user_executable(path: Path) -> bool:
     return path.stat().st_mode & stat.S_IXUSR != 0
@@ -33,13 +31,6 @@ def random_string(length:int = 16,
                   alphabet: str =string.ascii_letters + string.digits) -> str:
     return "".join(random.choices(alphabet, k=length))
 
-def zip_strict(*iterables) -> Iterable[tuple]: # waiting for Python 3.10 to just use zip strict option
-    sentinel = object()
-    for combo in zip_longest(*iterables, fillvalue=sentinel):
-        if sentinel in combo:
-            raise ValueError('Iterables have different lengths')
-        yield combo
-        
 def id2kmer(kmer_id: int,
             k: int,
             alphabet: list[str] =['A', 'C', 'G', 'T']) -> str:
@@ -57,7 +48,8 @@ def reverse_complement(seq: str,
         rev_compl.append(alphabet[s])
     return "".join(rev_compl)
 
-def kmers_generator(k: int) -> Generator[str, None, None]:
+def kmers_generator(k: int, 
+                    distinct_reversed: bool = False) -> Generator[str, None, None]:
     if k <= 0:
         raise Exception(f"k must positive: {k}")
     kmers = set()
@@ -66,9 +58,20 @@ def kmers_generator(k: int) -> Generator[str, None, None]:
         if s not in kmers:
             yield s
         kmers.add(s)
-        rs = reverse_complement(s)
-        kmers.add(rs)
-
+        if not distinct_reversed:
+            rs = reverse_complement(s)
+            kmers.add(rs)
+            
+def kmer_split(seq: str, 
+               k: int) -> Generator[str, None, None]:
+    if k <= 0:
+        raise Exception(f"k must be positive: {k}")
+    if len(seq) < k:
+        raise Exception(f"Length of sequence must be equal or greater than k, {k} vs {len(seq)}")
+    
+    for i in range(0, len(seq) - k + 1, 1):
+        yield seq[i:(i+k)]
+    
 class ConfigException(Exception):
     pass
 
@@ -400,11 +403,15 @@ class GKM_Dataset:
     @classmethod
     def kmer_dataset(cls, 
                      kmer_size: int,
+                     distinct_reversed: bool = False,
                      path: Optional[Union[str, Path]]=None, 
                      exists_ok=False) -> GKM_Dataset:
         if path is None:
             path = Path(tempfile.NamedTemporaryFile(mode="w+").name)
-        return cls.from_seqs(kmers_generator(kmer_size), path, namer=cls.get_id_namer())
+        return cls.from_seqs(kmers_generator(kmer_size,
+                                             distinct_reversed),
+                             path, 
+                             namer=cls.get_id_namer())
 
             
     @classmethod
@@ -414,18 +421,22 @@ class GKM_Dataset:
                   namer: Optional[Callable[[str], str]]=None) -> GKM_Dataset:
         if namer is None:
             namer = cls.get_sequential_namer()
-        names = map(namer, seqs)
-        return cls.from_seqs_names(names, seqs, path)
+        if path is None:
+            path = Path(tempfile.NamedTemporaryFile(mode="w+").name)
+        with open(path, "w") as fastafile:
+            for seq in seqs:
+                name = namer(seq)
+                print(f">{name}\n{seq}", file=fastafile)
+        return cls(path)
                 
     @classmethod
     def from_seqs_names(cls,
-                        names: Iterable[str],
-                        seqs: Iterable[str],
+                        names_seq: Iterable[tuple[str, str]],
                         path: Optional[Union[str, Path]]=None) -> GKM_Dataset:
         if path is None:
             path = Path(tempfile.NamedTemporaryFile(mode="w+").name)
         with open(path, "w") as infile:
-            for name, seq in zip_strict(names, seqs):
+            for name, seq in names_seq:
                 infile.write(f">{name}\n{seq}\n")
 
         return cls(path)
@@ -593,7 +604,8 @@ class GKMSVM:
         if  k < self.trainer.config.word_length:
             raise GKM_SVM_Exception(f"Can't score kmers for k ({k}) < "
                                     f"word_length ({self.trainer.config.word_length})")
-        ds = GKM_Dataset.kmer_dataset(k)
+        ds = GKM_Dataset.kmer_dataset(k, 
+                                      distinct_reversed=self.trainer.config.distinct_reversed)
         return self.predict(ds, return_path=True)
     
     def _restore(self) -> None:
@@ -719,3 +731,102 @@ class GKMSVM:
             name = f"{random_string()}.prediction.tab"
         return pred_dir / name
 
+@dataclass
+class SVMDelta:
+    scores: dict[str, float] = field(repr=False)
+    k: int
+    distinct_reversed: bool = False
+        
+    def __post_init__(self) -> None:
+        self._check_scores()
+            
+    def _check_scores(self) -> None:
+        kmers_cnt = 4 ** self.k
+        if kmers_cnt != len(self.scores):
+            raise GKM_SVM_Exception("Scores doesn't include information about all kmers."
+                                    f"Entries: {len(self.scores)}. Required: {kmers_cnt}")
+
+    def _check_seq(self, seq) -> None:
+        for s in seq:
+            if s not in ('A', 'T', 'G', 'C'):
+                raise GKM_SVM_Exception(f"Sequence must contain only A, T, G and C: {s}")
+    
+    def decision_function(self,
+                          seq: str) -> float:
+        self._check_seq(seq)
+        score = 0
+        
+        for kmer in kmer_split(seq, self.k):
+            score += self.scores[kmer]
+        return score
+    
+    def _trunc_seq(self, 
+                   seq:str,
+                   pos:int) -> tuple[seq, int]:
+        ss = max(0, pos-self.k+1)
+        se = min(len(seq), pos+self.k)
+        return seq[ss:se], pos - ss
+    
+    @staticmethod
+    def _get_alt_seq(seq: str, 
+                     pos: int,
+                     alt: str):
+        return seq[:pos] + alt + seq[pos+1:]
+    
+    def score_snv(self, 
+                  seq: str,
+                  pos: int,
+                  alt: str) -> float:
+        seq, pos = self._trunc_seq(seq, pos)
+        ref_seq = seq
+        alt_seq = self._get_alt_seq(seq, pos, alt)
+        ref_score = self.decision_function(ref_seq)
+        alt_score = self.decision_function(alt_seq)
+        return alt_score - ref_score
+    
+    def _check_save_path(path: Path,
+                         exists_ok: bool=True) -> None:
+        if path.exists():
+            if not exists_ok:
+                raise GKM_SVM_Exception(f"Provided path exists: {path}")
+            if not path.is_file():
+                raise GKM_SVM_Exception(f"Provided path is not a file: {path}")
+    
+    def save(self, path: Union[Path, str], exist_ok=True) -> None:
+        path = Path(path)
+        self._check_save_path(path)
+        with open(path, "w") as out:
+            for kmer, score in self.scores.items():
+                print(f"{kmer}\t{score}", file=out)
+        
+    
+    @staticmethod
+    def _check_load_path(path: Path) -> None:
+        if not path.exists():
+            raise GKM_SVM_Exception(f"Provided path doesn't exist: {path}")
+        if not path.is_file():
+            raise GKM_SVM_Exception(f"Provided path is not a file: {path}")
+    
+    @classmethod
+    def load(cls, 
+             path: Union[Path, str],
+             distinct_reversed=False) -> SVMDelta:
+        path = Path(path)
+        cls._check_load_path(path)
+        dt = {}
+        with open(path, "r") as k_scores:
+            seq, _ = k_scores.readline().split()
+            k = len(seq)
+            k_scores.seek(0)
+            
+            for ind, line in enumerate(k_scores):
+                seq, score = line.split()
+                score = float(score)
+                if len(seq) != k:
+                    raise GKM_SVM_Exception(f"Provided file contains kmers of different size: line {ind}. "
+                                            f"Expected {k}, got {len(seq)}")
+                dt[seq] = score
+                if not distinct_reversed:
+                    rseq = reverse_complement(seq)
+                    dt[rseq] = score
+        return cls(dt, k, distinct_reversed=distinct_reversed)

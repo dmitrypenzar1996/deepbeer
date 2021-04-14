@@ -23,7 +23,7 @@ def run_cmd(cmd: str, *, timeout=None) -> subprocess.CompletedProcess:
     cmd = shlex.split(cmd)
     pr = subprocess.run(cmd,
                         stdout=subprocess.PIPE,
-                        stderr=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
                         timeout=timeout)
     return pr
 
@@ -440,12 +440,16 @@ class GKM_Dataset:
                 infile.write(f">{name}\n{seq}\n")
 
         return cls(path)
-        
+
 @dataclass
 class GKMSVM_Trainer:
     workdir: Path
-    config: GKM_Train_Config =  field(default_factory=GKM_Train_Config)
-        
+    config: Optional[GKM_Train_Config] =  None
+
+    def __post_init__(self) -> None:
+        if self.config is None:
+            self.config = GKM_Train_Config()
+
     def run(self, 
              pos_path: Path, 
              neg_path: Path, 
@@ -504,8 +508,12 @@ class GKMSVM_Trainer:
 @dataclass
 class GKMSVM_Predictor:
     workdir: Path
-    config: GKM_Predict_Config = field(default_factory=GKM_Predict_Config)
+    config: Optional[GKM_Predict_Config] = None
         
+    def __post_init__(self):
+        if self.config is None:
+            self.config = GKM_Predict_Config()
+
     def run(self,
             model_path: Path,
             test_seq_file: Path,
@@ -571,8 +579,8 @@ class GKMSVM:
     _tmp_dir: Union[None, str] = field(default=None, 
                                        init=False)
     
-    train_config: InitVar[Union[GKM_Train_Config, Path, str]]  = field(default=GKM_Train_Config())
-    predict_config: InitVar[Union[GKM_Predict_Config, Path, str]] = field(default=GKM_Predict_Config())
+    train_config: InitVar[Optional[Union[GKM_Train_Config, Path, str]]]  = None
+    predict_config: InitVar[Optional[Union[GKM_Predict_Config, Path, str]]] = None
     rootdir: InitVar[Optional[Union[str, Path]]] = None
     exist_ok: InitVar[bool] = True
     rm_if_exist: InitVar[bool] = False
@@ -670,19 +678,26 @@ class GKMSVM:
             self.workdir = Path(self._tmp_dir.name) / self.model_tag
                 
     def __post_init__(self, 
-                      train_config: Union[GKM_Train_Config, Path, str],
-                      predict_config: Union[GKM_Train_Config, Path, str],
+                      train_config: Optional[Union[GKM_Train_Config, Path, str]],
+                      predict_config: Optional[Union[GKM_Predict_Config, Path, str]],
                       rootdir: Optional[Union[str, Path]], 
                       exist_ok: bool,
                       rm_if_exist: bool) -> None:
+
+    
         if rootdir is not None:
             rootdir = Path(rootdir)
         self._init_workdir(rootdir, 
                            exist_ok=exist_ok, 
                            rm_if_exist=rm_if_exist)
-        
-        if isinstance(train_config, (Path, str)):
+
+        if train_config is None:
+             train_config = GKM_Train_Config()
+        elif isinstance(train_config, (Path, str)):
             train_config = GKM_Train_Config.load(train_config)
+        
+        if predict_config is None:
+            predict_config = GKM_Predict_Config()
         if isinstance(predict_config, (Path, str)):
             predict_config = GKM_Predict_Config.load(predict_config)
 
@@ -690,8 +705,8 @@ class GKMSVM:
                                       workdir=self.workdir)
         self.predictor = GKMSVM_Predictor(config=predict_config,
                                       workdir=self._get_predictions_dir())                                            
-        self._save_cfg()
-    
+        self._save_cfg()    
+
     def _save_cfg(self) -> None:
         tr_path = self._get_train_config_path(self.workdir)
         self.trainer.config.save(tr_path)

@@ -711,7 +711,6 @@ class GKMSVM_Predictor:
         cmd = self._get_cmd(model_path, 
                             test_seq_file,
                             output_file)
-        print(cmd)
         pr = run_cmd(cmd)
         self._check_run(pr, output_file)
         

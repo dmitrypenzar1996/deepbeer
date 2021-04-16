@@ -1,6 +1,7 @@
 from __future__ import annotations
 import subprocess
 import shlex 
+import sys 
 import os
 import glob
 import json
@@ -11,11 +12,27 @@ import string
 import random
 import pandas as pd 
 
+from pandas.api.types import is_integer_dtype
 from dataclasses import dataclass, field, InitVar
-from typing import ClassVar, Union, Callable, Optional, Generator
+from typing import ClassVar, Union, Callable, Optional, Generator, Any, Generic, T
 from collections.abc import Iterable
 from pathlib import Path
+from Bio.SeqRecord import SeqRecord
+from Bio.Seq import Seq
+from Bio import SeqIO
 
+def get_classes_hierachy(cls: type):
+    classes = cls.__bases__
+    for cl in cls.__bases__:
+        classes += get_classes_hierachy(cl)
+    return classes
+
+def write_table(tb: pd.DataFrame, 
+                path: Union[str, Path],
+                index: bool = False,
+                **kwargs):
+    tb.to_csv(path, index=index, sep="\t", **kwargs)
+    
 def is_user_executable(path: Path) -> bool:
     return path.stat().st_mode & stat.S_IXUSR != 0
 
@@ -354,13 +371,142 @@ class GKM_Predict_Config(Config):
     def to_command_line(self) -> str:
         return f'''
 {self.gkmpredict_path}
--v {self.verbosity}
+-v {self.VERBOSE_LEVELS[self.verbosity]}
 -T {self.n_procs}
 '''
+    
+@dataclass
+class Filter(Generic[T]):
+    _filters: list[Callable[[Filter, Any], bool]] = field(default=None, repr=False, init=False)
+    
+    def pass_filters(self, item: Any) -> bool:
+        for filt in self.filters:
+            if not getattr(self, filt)(item):
+                return False
+        return True
+    
+    def apply(self, it: Iteratable[Any]) -> Generator[Any, None, None]:
+        for item in it:
+            if self.pass_filters(item):
+                yield item
+                
+    def _infer_filters(self) -> list[Callable[[Filter, Any], bool]]:
+        filters = []
+        classes = get_classes_hierachy(self.__class__) + (self.__class__, )
+        for cls in classes:
+            for m in dir(cls):
+                if m.startswith("filter_") and m not in filters:
+                    filters.append(m)
+
+        return filters
+    
+    @property
+    def filters(self):
+        if self._filters is None:
+            self._filters = self._infer_filters()
+        return self._filters
+    
+@dataclass
+class FASTAFilter(Filter[Union[SeqRecord, Seq, str]]):
+    pass
 
 @dataclass
-class GKM_Dataset:
-    path: Optional[Path] = None
+class BEDFilter(Filter['pandas.core.frame.Pandas']):
+    pass
+    
+@dataclass
+class GKM_FASTAFilter(FASTAFilter):
+    max_length: int
+    ALPHABET: ClassVar[Union[str, list[str], set[str]]] =  'ATGCatgc'
+            
+    def filter_length(self, seq: Union[SeqRecord, Seq, str]) -> bool:
+        if len(seq) > self.max_length:
+            return False
+        return True
+        
+    def filter_alphabet(self, seq: Union[SeqRecord, Seq, str]) -> bool:
+        for n in seq:
+            if n not in self.ALPHABET:
+                return False
+        return True
+    
+class GKM_BEDFilter(BEDFilter):
+    HUMAN_AUTOSOMES: ClassVar[set[str]] = set([f"chr{i}" for i in range(1, 22)])
+
+    def filter_chromosomes(self, row: pandas.core.frame.Pandas) -> bool:
+        if row.chr not in self.HUMAN_AUTOSOMES:
+            return False
+        return True
+
+@dataclass
+class Genome:
+    _chromosomes: dict[str, SeqRecord] = field(repr=False)
+    
+    def __getitem__(self, key):
+        return self._chromosomes[key]
+    
+    @classmethod
+    def from_fasta_file(cls, fasta_path: Union[str, Path]):
+        fasta_path = Path(fasta_path)
+        chroms = SeqIO.to_dict(SeqIO.parse('genomes/hg38.fa', 
+                                           format='fasta'))
+        return cls(chroms)
+
+
+@dataclass 
+class BEDDataset:
+    _table: pd.DataFrame = field(repr=False)
+    _filter: BEDFilter
+
+    def __len__(self):
+        return self._table.shape[0]
+    
+    def __iter__(self):
+        return self._filter.apply(self._table.itertuples())
+    
+    @staticmethod
+    def _check_chr_column(table):
+        if not 'chr' in table:
+            raise Exception('File must contain "chr" column, explicitly named in the header')
+        for val in table['chr']:
+            if not isinstance(val, str):
+                raise Exception('"chr" column must contain only strings')
+     
+    @staticmethod
+    def _check_start_column(table):
+        if not 'start' in table:
+            raise Exception('File must contain "start" column, explicitly named in the header')
+        if not is_integer_dtype(table['start'].dtype):
+            raise Exception('"start" column must contain only integers')
+            
+    @staticmethod
+    def _check_end_column(table):
+        if not 'end' in table:
+            raise Exception('File must contain "end" column, explicitly named in the header')
+        if not is_integer_dtype(table['end'].dtype):
+            raise Exception('"end" column must contain only integers')  
+    
+    @classmethod
+    def from_table(cls, 
+                   table: Union[str, Path, pd.DataFrame],
+                   filter: Optional[BedFilter]=None):
+        if not isinstance(table, pd.DataFrame):
+            table = pd.read_table(table)
+        cls._check_chr_column(table)
+        cls._check_start_column(table)
+        cls._check_end_column(table)
+        if filter is None:
+            filter = BEDFilter()
+        
+        return cls(table, filter)
+    
+@dataclass
+class FASTA_Dataset:
+    length: int 
+    path: Path
+        
+    def __len__(self):
+        return self.length
     
     @staticmethod
     def get_sequential_namer(pref: str="seq") -> Callable[[str], str]:
@@ -385,61 +531,102 @@ class GKM_Dataset:
         for seq in X:
             if not isinstance(seq, str):
                 raise GKM_SVM_Exception(f"X must be list or array of strings")
-                
+    
+    @staticmethod
+    def _gen_temp_path() -> Path:
+        temp = tempfile.NamedTemporaryFile(mode="w+")
+        return Path(temp.name)
+       
+    @classmethod
+    def from_seqrecs(cls,
+                     seqrecs: Iterable[SeqRecord],
+                     path: Optional[Union[str, Path]]=None,
+                     fasta_filter: FASTAFilter=None):
+        if path is None:
+            path = cls._gen_temp_path()
+        if fasta_filter is None:
+            fasta_filter = FASTAFilter()
+            
+        filt_it = fasta_filter.apply(seqrecs)
+        with open(path, "w") as handle:
+            length = SeqIO.write(filt_it, handle, format='fasta')
+
+        return cls(length, path)   
+    
     @classmethod
     def from_fasta_file(cls, 
-                        fasta_path: Union[str, Path]) -> GKM_Dataset:
-        return cls(path=Path(fasta_path))
+                        fasta_path: Union[str, Path],
+                        dataset_path: Optional[Union[str, Path]]=None,
+                        fasta_filter: FASTAFilter= None) -> FASTA_Dataset:
+        seq_it = SeqIO.parse(fasta_path)
+        return cls.from_seqrecs(seq_it,
+                                dataset_path, 
+                                fasta_filter)
     
     @classmethod
-    def from_bed_file(bed_path: Union[str, Path], 
-                      genome_path: Union[str, Path]) -> GKM_Dataset:
-        raise NotImplementedError()
-    
-    @classmethod
-    def from_gc_sampling(dataset: GKM_Dataset) -> GKM_Dataset:
-        raise NotImplementedError()
+    def from_seqs(cls,
+                  seqs: Iterable[str],
+                  path: Optional[Union[str, Path]]=None,
+                  namer: Optional[Callable[[str], str]]=None,
+                  fasta_filter: FASTAFilter=None) -> FASTA_Dataset:
+        if namer is None:
+            namer = cls.get_sequential_namer()
+        seq_it = (SeqRecord(seq, id=namer(seq)) for seq in seqs)
         
+        return cls.from_seqrecs(seq_it,
+                                path, 
+                                fasta_filter)
+                
+    @classmethod
+    def from_seqs_names(cls,
+                        names_seq: Iterable[tuple[str, str]],
+                        path: Optional[Union[str, Path]]=None,
+                        fasta_filter: FASTAFilter=None) -> FASTA_Dataset:
+            
+        seq_it = (SeqRecord(seq, id=name) for name, seq in names_seq)
+        return cls.from_seqrecs(seq_it,
+                                path,
+                                fasta_filter)
+    
+    @staticmethod
+    def _extract_seqrec_from_bed(row, genome: Genome):
+        seq = genome[row.chr][row.start:row.end].seq
+        seqrec = SeqRecord(seq=seq, 
+                           id=f"{row.chr}_{row.start}:{row.end}")
+        return seqrec
+    
+    @classmethod
+    def from_BEDDataset(cls,
+                        bed_dataset: Union[str, Path, BEDDataset], 
+                        genome: Union[str, Path, Genome], 
+                        out_path: Optional[Union[str, Path]]=None,
+                        filter: FASTAFilter=None) -> FASTA_Dataset:
+        if not isinstance(genome, Genome):
+            genome = Genome.from_fasta_file(genome)   
+        if not isinstance(bed_dataset, BEDDataset):
+            bed_dataset = BEDDataset.from_table(bed_dataset)
+
+        seq_it = (cls._extract_seqrec_from_bed(row, genome) for row in bed_dataset)
+        return cls.from_seqrecs(seq_it,
+                                out_path, 
+                                filter)
+        
+        
+    @classmethod
+    def from_gc_sampling(dataset: FASTA_Dataset) -> FASTA_Dataset:
+        raise NotImplementedError()
+
     @classmethod
     def kmer_dataset(cls, 
                      kmer_size: int,
                      distinct_reversed: bool = False,
                      path: Optional[Union[str, Path]]=None, 
-                     exists_ok=False) -> GKM_Dataset:
-        if path is None:
-            path = Path(tempfile.NamedTemporaryFile(mode="w+").name)
+                     exists_ok=False) -> FASTA_Dataset:
         return cls.from_seqs(kmers_generator(kmer_size,
                                              distinct_reversed),
                              path, 
-                             namer=cls.get_id_namer())
-
-            
-    @classmethod
-    def from_seqs(cls,
-                  seqs: Iterable[str],
-                  path: Optional[Union[str, Path]]=None,
-                  namer: Optional[Callable[[str], str]]=None) -> GKM_Dataset:
-        if namer is None:
-            namer = cls.get_sequential_namer()
-        if path is None:
-            path = Path(tempfile.NamedTemporaryFile(mode="w+").name)
-        with open(path, "w") as fastafile:
-            for seq in seqs:
-                name = namer(seq)
-                print(f">{name}\n{seq}", file=fastafile)
-        return cls(path)
-                
-    @classmethod
-    def from_seqs_names(cls,
-                        names_seq: Iterable[tuple[str, str]],
-                        path: Optional[Union[str, Path]]=None) -> GKM_Dataset:
-        if path is None:
-            path = Path(tempfile.NamedTemporaryFile(mode="w+").name)
-        with open(path, "w") as infile:
-            for name, seq in names_seq:
-                infile.write(f">{name}\n{seq}\n")
-
-        return cls(path)
+                             namer=cls.get_id_namer(),
+                             filter=FastaFilter())
 
 @dataclass
 class GKMSVM_Trainer:
@@ -468,11 +655,14 @@ class GKMSVM_Trainer:
         log_path = self._get_log_path(model_path)
         stdout = self._store_runout(pr, log_path)
         if pr.returncode != 0:
-            raise GKM_SVM_Exception(f"gkmtrain exited with error: {stdout}")
+            raise GKM_SVM_Exception(f"gkmtrain exited with error: {log_path}")
         
-        lstd = stdout.lower()
-        if "wrong" in lstd or "error" in lstd:
-            raise GKM_SVM_Exception(f"gkmtrain exited with error: {stdout}")
+        std_low = stdout.lower()
+        if "wrong" in std_low or "error" in  std_low:
+            raise GKM_SVM_Exception(f"gkmtrain exited with error: {log_path}")
+            
+        if 'warn' in std_low:
+            print(f"gkmtrain output contains warning: {log_path}", file=sys.stderr)
 
         if not model_path.exists():
             raise GKM_SVM_Exception(f"For the uknown reason gkmtrain didn't create model file")
@@ -521,6 +711,7 @@ class GKMSVM_Predictor:
         cmd = self._get_cmd(model_path, 
                             test_seq_file,
                             output_file)
+        print(cmd)
         pr = run_cmd(cmd)
         self._check_run(pr, output_file)
         
@@ -547,6 +738,9 @@ class GKMSVM_Predictor:
         std_low = stdout.lower()
         if "wrong" in std_low or "error" in std_low:
             raise GKM_SVM_Exception(f"gkmpredict exited with error. Program stdout is at {logpath}")
+           
+        if 'warn' in  std_low:
+            print(f"gkmtrain output contains warning: {log_path}", file=sys.stderr)
             
         if not pred_path.exists():
             raise GKM_SVM_Exception(f"For the uknown reason gkmpredict didn't create predictions file")
@@ -586,8 +780,8 @@ class GKMSVM:
     rm_if_exist: InitVar[bool] = False
         
     def fit(self,
-            positive_dataset: GKM_Dataset,
-            negative_dataset: GKM_Dataset) -> GKMSVM:
+            positive_dataset: FASTA_Dataset,
+            negative_dataset: FASTA_Dataset) -> GKMSVM:
         if self.fitted:
             self._restore()
         out_pref = self._get_model_path_pref(self.workdir)
@@ -595,7 +789,7 @@ class GKMSVM:
         return self
     
     def predict(self, 
-                dataset: GKM_Dataset,
+                dataset: FASTA_Dataset,
                 return_path: bool=False) -> Union[pd.DataFrame, Path]:
         if not self.fitted:
             raise GKM_SVM_Exception("Model is not trained")
@@ -612,7 +806,7 @@ class GKMSVM:
         if  k < self.trainer.config.word_length:
             raise GKM_SVM_Exception(f"Can't score kmers for k ({k}) < "
                                     f"word_length ({self.trainer.config.word_length})")
-        ds = GKM_Dataset.kmer_dataset(k, 
+        ds = FASTA_Dataset.kmer_dataset(k, 
                                       distinct_reversed=self.trainer.config.distinct_reversed)
         return self.predict(ds, return_path=True)
     
@@ -626,7 +820,6 @@ class GKMSVM:
         workdir = Path(workdir)
         tr_cfg = cls._get_train_config_path(workdir)
         pr_cfg = cls._get_predict_config_path(workdir)
-        
         model_path = cls._get_model_path(workdir)
         if not model_path.exists():
             model_path = None

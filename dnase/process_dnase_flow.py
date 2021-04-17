@@ -120,6 +120,7 @@ class BamFlagStatOutput:
                 f"passing quality threshold, {fail} others"
             )
             warnings.append(msg)
+        # noinspection DuplicatedCode
         if self.secondary.total > 0:
             msg = (
                 f"BAM contains secondary alignments, {self.secondary.passed} "
@@ -132,6 +133,8 @@ class BamFlagStatOutput:
                 f"passing quality threshold, {self.supplementary.failed} others"
             )
             warnings.append(msg)
+
+        # noinspection DuplicatedCode
         if self.duplicates.total > 0:
             msg = (
                 f"BAM contains duplicates, {self.duplicates.passed} "
@@ -175,6 +178,7 @@ class BAMChecker(Task):
         self.samtools_cfg = samtools_cfg
         super().__init__(**kwargs)
 
+    # noinspection PyMethodOverriding
     def run(self, bam_path):
         cmd = make_samtools_flagstat_cmd(bam_path=bam_path, **self.samtools_cfg)
         result = run_cmd(cmd)
@@ -340,6 +344,7 @@ class Macs2CallPeak(Task):
         self.macs2callpeak_cfg = macs2callpeak_cfg
         super().__init__(**kwargs)
 
+    # noinspection PyMethodOverriding
     def run(self, *, treatment_files, control_files, fmt, outdir, out_peak_pref):
         cmd = make_macs2_callpeak_cmd(
             treatment_files=treatment_files,
@@ -448,6 +453,8 @@ class IDROutput:
     def generate_warnings(self):
         warnings = []
         pos = self.positive_dataset()
+
+        # noinspection DuplicatedCode
         if pos.shape[0] < self.MIN_POSITIVE_SIZE:
             msg = f"The number of positive examples is less than {self.MIN_POSITIVE_SIZE}: {pos.shape[0]}"
             warnings.append(msg)
@@ -456,6 +463,8 @@ class IDROutput:
             warnings.append(msg)
 
         neg = self.negative_dataset()
+
+        # noinspection DuplicatedCode
         if neg.shape[0] < self.MIN_NEGATIVE_SIZE:
             msg = f"The number of negative examples is less than {self.MIN_NEGATIVE_SIZE}: {neg.shape[0]}"
             warnings.append(msg)
@@ -511,6 +520,7 @@ class IDR(Task):
         self.idr_cfg = idr_cfg
         super().__init__(**kwargs)
 
+    # noinspection PyMethodOverriding
     def run(self, *, peaks, oracle, out_dir, peak_fmt):
         peak_files = [p.peak_path for p in peaks]
         oracle_path = oracle.peak_path if oracle else None

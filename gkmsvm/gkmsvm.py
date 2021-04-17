@@ -22,8 +22,6 @@ from Bio.Seq import Seq  # type: ignore
 from Bio.SeqRecord import SeqRecord  # type: ignore
 from pandas.api.types import is_integer_dtype  # type: ignore
 
-T = TypeVar("T")
-
 
 def write_table(
     tb: pd.DataFrame, path: Union[str, Path], index: bool = False, **kwargs: Any
@@ -448,6 +446,9 @@ class GkmPredictConfig(Config):
 -v {self.VERBOSE_LEVELS[self.verbosity]}
 -T {self.n_procs}
 """
+
+
+T = TypeVar("T")
 
 
 @dataclass

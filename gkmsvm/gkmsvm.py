@@ -735,7 +735,7 @@ class GkmSvmTrainer:
     def run(self, pos_path: Path, neg_path: Path, out_pref: Path) -> Path:
         cmd = self._get_cmd(pos_path, neg_path, out_pref)
         pr = run_cmd(cmd)
-        model_path = self._get_model_path(out_pref)
+        model_path = self.get_model_path(out_pref)
         self._check_run(pr, model_path)
 
         return model_path
@@ -768,7 +768,7 @@ class GkmSvmTrainer:
         return cmd
 
     @staticmethod
-    def _get_model_path(out_pref: Path) -> Path:
+    def get_model_path(out_pref: Path) -> Path:
         return Path(f"{out_pref}.model.txt")
 
     @staticmethod
@@ -871,7 +871,7 @@ class GkmSVM:
     def fit(
         self, positive_dataset: FastaDataset, negative_dataset: FastaDataset
     ) -> GkmSVM:
-        out_pref = self._get_model_path_pref(self.workdir)
+        out_pref = self._get_model_path_pref()
         self.model_path = self.trainer.run(
             positive_dataset.path, negative_dataset.path, out_pref
         )
@@ -915,7 +915,6 @@ class GkmSVM:
             model_tag=model_tag,
             exist_ok=True,
             rm_if_exist=False)
-        
 
     @staticmethod
     def _gen_model_tag(root_dir: Path) -> str:
@@ -1010,7 +1009,7 @@ class GkmSVM:
     
     def _get_model_path(self) -> Path:
         pref = self._get_model_path_pref()
-        return self.trainer._get_model_path(pref)
+        return self.trainer.get_model_path(pref)
 
     @staticmethod
     def _get_train_config_path(workdir: Path) -> Path:

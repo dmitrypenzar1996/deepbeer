@@ -149,7 +149,7 @@ class Config:
         with open(config_path) as infile:
             dt = json.load(infile)
         # noinspection PyArgumentList
-        return cls(**dt)  # type: ignore
+        return cls(**dt)
 
     @staticmethod
     def _check_config_path(config_path: Path) -> None:
@@ -723,7 +723,7 @@ class FastaDataset:
 @dataclass
 class GkmSvmTrainer:
     workdir: Path
-    config: GkmTrainConfig
+    config: GkmTrainConfig = field(init=False)
 
     cfg: InitVar[Optional[GkmTrainConfig]] = None
 
@@ -790,7 +790,7 @@ class GkmSvmTrainer:
 @dataclass
 class GkmSvmPredictor:
     workdir: Path
-    config: GkmPredictConfig
+    config: GkmPredictConfig = field(init=False)
 
     cfg: InitVar[Optional[GkmPredictConfig]] = None
 
@@ -906,14 +906,16 @@ class GkmSVM:
         tr_cfg = cls._get_train_config_path(workdir)
         pr_cfg = cls._get_predict_config_path(workdir)
         root_dir = workdir.parent
+        model_tag = workdir.name
 
         return cls(
             train_config=tr_cfg,
             predict_config=pr_cfg,
             root_dir=root_dir,
+            model_tag=model_tag,
             exist_ok=True,
-            rm_if_exist=False,
-        )
+            rm_if_exist=False)
+        
 
     @staticmethod
     def _gen_model_tag(root_dir: Path) -> str:
@@ -962,13 +964,14 @@ class GkmSVM:
 
         if root_dir is not None:
             root_dir = Path(root_dir)
+            
         self._init_workdir(
             root_dir=root_dir,
             model_tag=model_tag,
             exist_ok=exist_ok,
             rm_if_exist=rm_if_exist,
         )
-
+        
         if train_config is None:
             train_config = GkmTrainConfig()
         elif isinstance(train_config, (Path, str)):
@@ -979,11 +982,18 @@ class GkmSVM:
         if isinstance(predict_config, (Path, str)):
             predict_config = GkmPredictConfig.load(predict_config)
 
-        self.trainer = GkmSvmTrainer(config=train_config, workdir=self.workdir)
+        self.trainer = GkmSvmTrainer(cfg=train_config, 
+                                     workdir=self.workdir)
         self.predictor = GkmSvmPredictor(
-            config=predict_config, workdir=self._get_predictions_dir()
+            cfg=predict_config, 
+            workdir=self._get_predictions_dir()
         )
         self._save_cfg()
+        
+        model_path = self._get_model_path()
+        
+        if model_path.exists():
+            self.model_path = model_path
 
     def _save_cfg(self) -> None:
         tr_path = self._get_train_config_path(self.workdir)
@@ -995,9 +1005,12 @@ class GkmSVM:
     def fitted(self) -> bool:
         return self.model_path is not None
 
-    @staticmethod
-    def _get_model_path_pref(workdir: Path) -> Path:
-        return workdir / "gkm"
+    def _get_model_path_pref(self) -> Path:
+        return self.workdir / "gkm"
+    
+    def _get_model_path(self) -> Path:
+        pref = self._get_model_path_pref()
+        return self.trainer._get_model_path(pref)
 
     @staticmethod
     def _get_train_config_path(workdir: Path) -> Path:

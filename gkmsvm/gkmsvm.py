@@ -15,18 +15,18 @@ from pathlib import Path
 from typing import (Any, Callable, ClassVar, Generator, Generic, Optional, List, Dict, Set, Tuple,
                     Union, TypeVar)
 
-import pandas as pd
-from Bio import SeqIO
-from Bio.Seq import Seq
-from Bio.SeqRecord import SeqRecord
-from pandas.api.types import is_integer_dtype
+import pandas as pd # type: ignore
+from Bio import SeqIO # type: ignore
+from Bio.Seq import Seq # type: ignore
+from Bio.SeqRecord import SeqRecord # type: ignore
+from pandas.api.types import is_integer_dtype # type: ignore
 
 T = TypeVar('T')
 
 
 def write_table(
         tb: pd.DataFrame, path: Union[str, Path], index: bool = False, **kwargs
-):
+) -> None:
     tb.to_csv(path, index=index, sep="\t", **kwargs)
 
 
@@ -35,9 +35,9 @@ def is_user_executable(path: Path) -> bool:
 
 
 def run_cmd(cmd: str, *, timeout=None) -> subprocess.CompletedProcess:
-    cmd = shlex.split(cmd)
+    cmd_lst = shlex.split(cmd)
     pr = subprocess.run(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout
+        cmd_lst, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout
     )
     return pr
 
@@ -140,15 +140,16 @@ class Config:
         self.validate()
 
     @classmethod
-    def load(cls, config_path: [str, Path]) -> Config:
-        cls.check_config_path(config_path)
+    def load(cls, config_path: Union[str, Path]) -> Config:
+        config_path = Path(config_path)
+        cls._check_config_path(config_path)
         with open(config_path) as infile:
             dt = json.load(infile)
         # noinspection PyArgumentList
         return cls(**dt)
 
     @staticmethod
-    def check_config_path(config_path: [str, Path]) -> None:
+    def _check_config_path(config_path: Path) -> None:
         config_path = Path(config_path)
         if not config_path.exists():
             raise ConfigException("Config path doesn't exists")
@@ -187,8 +188,8 @@ class GkmTrainConfig(Config):
         "wgkm": 4,
         "wgkmrbf": 5,
     }
-    RBF_KERNELS: ClassVar[Tuple[str]] = ("gkmrbf", "wgkmrbf")
-    WEIGHT_KERNELS: ClassVar[Tuple[str]] = ("wgkm", "wgkmrbf")
+    RBF_KERNELS: ClassVar[Tuple] = ("gkmrbf", "wgkmrbf")
+    WEIGHT_KERNELS: ClassVar[Tuple] = ("wgkm", "wgkmrbf")
     VERBOSE_LEVELS: ClassVar[Dict[str, int]] = {
         "error": 0,
         "warning": 1,
@@ -446,7 +447,7 @@ class GkmPredictConfig(Config):
 
 @dataclass
 class Filter(Generic[T]):
-    _filters: List[str] = field(
+    _filters: Optional[List[str]] = field(
         default=None, repr=False, init=False
     )
 
@@ -622,6 +623,7 @@ class FastaDataset:
     ):
         if path is None:
             path = cls._gen_temp_path()
+        path = Path(path)
         if filter is None:
             filter = FASTAFilter()
 
@@ -710,11 +712,14 @@ class FastaDataset:
 @dataclass
 class GkmSvmTrainer:
     workdir: Path
-    config: Optional[GkmTrainConfig] = None
+    config: GkmTrainConfig
 
-    def __post_init__(self) -> None:
-        if self.config is None:
-            self.config = GkmTrainConfig()
+    cfg: InitVar[Optional[GkmTrainConfig]] = None
+
+    def __post_init__(self, cfg: Optional[GkmTrainConfig]) -> None:
+        if cfg is None:
+            cfg = GkmTrainConfig()
+        self.config = cfg
 
     def run(self, pos_path: Path, neg_path: Path, out_pref: Path) -> Path:
         cmd = self._get_cmd(pos_path, neg_path, out_pref)
@@ -772,11 +777,14 @@ class GkmSvmTrainer:
 @dataclass
 class GkmSvmPredictor:
     workdir: Path
-    config: Optional[GkmPredictConfig] = None
+    config: GkmPredictConfig
 
-    def __post_init__(self):
-        if self.config is None:
-            self.config = GkmPredictConfig()
+    cfg: InitVar[Optional[GkmPredictConfig]] = None
+
+    def __post_init__(self, cfg: Optional[GkmPredictConfig]):
+        if cfg is None:
+            cfg = GkmPredictConfig()
+        self.config = cfg
 
     def run(self, model_path: Path, test_seq_file: Path, output_file: Path) -> Path:
         cmd = self._get_cmd(model_path, test_seq_file, output_file)
@@ -832,17 +840,16 @@ class GkmSvmPredictor:
 
 @dataclass
 class GkmSVM:
-    model_path: Union[None, Path] = None
-    model_tag: Union[None, str] = None
-
     trainer: GkmSvmTrainer = field(init=False)
     predictor: GkmSvmPredictor = field(init=False)
-    workdir: Union[None, Path] = field(init=False)
+    workdir: Path = field(init=False)
+    model_path: Optional[Path] = field(init=False, default=None)
     _tmp_dir: Union[None, tempfile.TemporaryDirectory] = field(default=None, init=False)
 
     train_config: InitVar[Optional[Union[GkmTrainConfig, Path, str]]] = None
     predict_config: InitVar[Optional[Union[GkmPredictConfig, Path, str]]] = None
     root_dir: InitVar[Optional[Union[str, Path]]] = None
+    model_tag: InitVar[Union[None, str]] = None
     exist_ok: InitVar[bool] = True
     rm_if_exist: InitVar[bool] = False
 
@@ -886,17 +893,11 @@ class GkmSVM:
         workdir = Path(workdir)
         tr_cfg = cls._get_train_config_path(workdir)
         pr_cfg = cls._get_predict_config_path(workdir)
-        model_path = cls._get_model_path(workdir)
-        if not model_path.exists():
-            model_path = None
-        model_tag = workdir.name
         root_dir = workdir.parent
 
         return cls(
             train_config=tr_cfg,
             predict_config=pr_cfg,
-            model_path=model_path,
-            model_tag=model_tag,
             root_dir=root_dir,
             exist_ok=True,
             rm_if_exist=False,
@@ -918,32 +919,39 @@ class GkmSVM:
             if rm_if_exist:
                 shutil.rmtree(self.workdir)
 
-    def _init_workdir(self, root_dir: Optional[Path], exist_ok: bool, rm_if_exist: bool):
+    def _init_workdir(self,
+                      root_dir: Optional[Path],
+                      model_tag: Optional[str],
+                      exist_ok: bool,
+                      rm_if_exist: bool):
         if root_dir is not None:
-            if self.model_tag is None:
+            if model_tag is None:
                 model_tag = self._gen_model_tag(root_dir)
-                self.model_tag = model_tag
-            self.workdir = root_dir / self.model_tag
+            self.workdir = root_dir / model_tag
             self._check_workdir(exist_ok=exist_ok, rm_if_exist=rm_if_exist)
             self.workdir.mkdir(parents=True, exist_ok=True)
         else:
             self._tmp_dir = tempfile.TemporaryDirectory()
-            if self.model_tag is None:
-                self.model_tag = "model"
-            self.workdir = Path(self._tmp_dir.name) / self.model_tag
+            if model_tag is None:
+                model_tag = "model"
+            self.workdir = Path(self._tmp_dir.name) / model_tag
 
     def __post_init__(
             self,
             train_config: Optional[Union[GkmTrainConfig, Path, str]],
             predict_config: Optional[Union[GkmPredictConfig, Path, str]],
             root_dir: Optional[Union[str, Path]],
+            model_tag: Optional[str],
             exist_ok: bool,
             rm_if_exist: bool,
     ) -> None:
 
         if root_dir is not None:
             root_dir = Path(root_dir)
-        self._init_workdir(root_dir, exist_ok=exist_ok, rm_if_exist=rm_if_exist)
+        self._init_workdir(root_dir=root_dir,
+                           model_tag=model_tag,
+                           exist_ok=exist_ok,
+                           rm_if_exist=rm_if_exist)
 
         if train_config is None:
             train_config = GkmTrainConfig()
@@ -971,13 +979,9 @@ class GkmSVM:
     def fitted(self) -> bool:
         return self.model_path is not None
 
-    @classmethod
-    def _get_model_path_pref(cls, workdir: Path) -> Path:
+    @staticmethod
+    def _get_model_path_pref(workdir: Path) -> Path:
         return workdir / "gkm"
-
-    @classmethod
-    def _get_model_path(cls, workdir) -> Path:
-        return Path(f"{cls._get_model_path_pref(workdir)}.model.txt")
 
     @staticmethod
     def _get_train_config_path(workdir: Path) -> Path:
@@ -1028,7 +1032,7 @@ class SVMDelta:
 
     def decision_function(self, seq: str) -> float:
         self._check_seq(seq)
-        score = 0
+        score = 0.0
 
         for kmer in kmer_split(seq, self.k):
             score += self.scores[kmer]
@@ -1079,15 +1083,15 @@ class SVMDelta:
     def load(cls, path: Union[Path, str], distinct_reversed=False) -> SVMDelta:
         path = Path(path)
         cls._check_load_path(path)
-        dt = {}
+        dt: Dict[str, float] = {}
         with open(path, "r") as k_scores:
             seq, _ = k_scores.readline().split()
             k = len(seq)
             k_scores.seek(0)
 
             for ind, line in enumerate(k_scores):
-                seq, score = line.split()
-                score = float(score)
+                seq, score_s = line.split()
+                score = float(score_s)
                 if len(seq) != k:
                     raise GkmSvmException(
                         f"Provided file contains kmers of different size: line {ind}. "

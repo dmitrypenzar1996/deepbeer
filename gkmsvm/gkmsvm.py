@@ -539,17 +539,41 @@ class Genome:
         return cls(chroms)
 
 
+from collections import namedtuple
+GenomeRow = namedtuple("GenomeRow", ['chr', 'start', 'end'])
+    
+class BedModifier:
+    def apply(self, it: Iterable[BedRow]):
+        yield from it
+            
+class PadBedModifier(BedModifier):
+    def __init__(self, min_size=1001):
+        self.min_size = min_size
+    
+    def apply(self, it: Iterable[BedRow]):
+        for row in it:
+            l = row.end - row.start 
+            if l > self.min_size:
+                yield row
+            rest = self.min_size - l
+            lpad = rest // 2
+            rpad = lpad + rest % 2 
+
+            yield GenomeRow(row.chr, row.start - lpad, row.end + rpad)
+
+
 @dataclass
 class BedDataset:
     _table: pd.DataFrame = field(repr=False)
     _filter: BedFilter
+    _modifier: BedModifier
 
     def __len__(self) -> int:
         length: int = self._table.shape[0]
         return length
 
     def __iter__(self) -> Iterator[BedRow]:
-        return self._filter.apply(self._table.itertuples())
+        return self._modifier.apply(self._filter.apply(self._table.itertuples()))
 
     @staticmethod
     def _check_chr_column(table: pd.DataFrame) -> None:
@@ -581,7 +605,10 @@ class BedDataset:
 
     @classmethod
     def from_table(
-        cls, table: Union[str, Path, pd.DataFrame], filter: Optional[BedFilter] = None
+        cls,
+        table: Union[str, Path, pd.DataFrame],
+        filter: Optional[BedFilter] = None,
+        modifier: BedModifier = None
     ) -> BedDataset:
         if not isinstance(table, pd.DataFrame):
             table = pd.read_table(table)
@@ -590,8 +617,10 @@ class BedDataset:
         cls._check_end_column(table)
         if filter is None:
             filter = BedFilter()
+        if modifier is None:
+            modifier = BedModifier()
 
-        return cls(table, filter)
+        return cls(table, filter, modifier)
 
 
 @dataclass
@@ -664,7 +693,7 @@ class FastaDataset:
     ) -> FastaDataset:
         if namer is None:
             namer = cls.get_sequential_namer()
-        seq_it = (SeqRecord(seq, id=namer(seq)) for seq in seqs)
+        seq_it = (SeqRecord(Seq(seq), id=namer(seq)) for seq in seqs)
 
         return cls.from_seqrecs(seq_it, path, filter)
 
@@ -676,7 +705,7 @@ class FastaDataset:
         filter: Optional[FastaFilter] = None,
     ) -> FastaDataset:
 
-        seq_it = (SeqRecord(seq, id=name) for name, seq in names_seq)
+        seq_it = (SeqRecord(seq=Seq(seq), id=name) for name, seq in names_seq)
         return cls.from_seqrecs(seq_it, path, filter)
 
     @staticmethod
